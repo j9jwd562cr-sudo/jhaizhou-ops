@@ -1,0 +1,13 @@
+.prepared-downloads/
+.prepared-input/
+.native-module-cache/
+native-build/
+upstream/
+outputs/
+.venv*/
+__pycache__/
+*.ipa
+.game-downloads/
+.macos-*/
+
+.ios-*/

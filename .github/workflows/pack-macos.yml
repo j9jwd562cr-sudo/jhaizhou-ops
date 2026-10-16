@@ -1,0 +1,152 @@
+name: Reusable prepared-input macOS build
+on:
+  workflow_call:
+    inputs:
+      prepared_input:
+        description: Prepared package configuration as JSON
+        type: string
+        required: true
+      source_repository:
+        type: string
+        default: jhaizhou-ops/d2r-mobile
+      source_ref:
+        type: string
+        default: ''
+      publish:
+        type: boolean
+        default: true
+    secrets:
+      SOURCE_TOKEN:
+        required: false
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: d2r-macos-build
+  queue: max
+  cancel-in-progress: false
+jobs:
+  macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+      GH_TOKEN: ${{ github.token }}
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PYTHONUTF8: '1'
+    steps:
+      - name: Resolve the tools revision
+        id: tools
+        uses: jiayx/d2r-mobile-build/.github/actions/resolve-tools@main
+        with:
+          workflow: pack-macos.yml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: jiayx/d2r-mobile-build
+          ref: ${{ steps.tools.outputs.tools_commit }}
+          persist-credentials: false
+      - name: Select the latest release or requested source
+        id: source
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_TOKEN || github.token }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: python3 scripts/source/resolve.py
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.source_repository }}
+          token: ${{ secrets.SOURCE_TOKEN || github.token }}
+          ref: ${{ steps.source.outputs.ref }}
+          fetch-depth: 0
+          path: upstream
+          persist-credentials: false
+      - name: Record the selected source and build identity
+        run: python3 scripts/source/configure.py
+      - name: Select the Apple toolchain
+        run: python3 scripts/source/select_xcode.py
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install the archive downloader
+        run: python -m pip install -r requirements.txt pillow==12.1.1 numpy==2.4.4
+      - name: Resolve the Mac prepared input
+        id: input
+        env:
+          PREPARED_INPUT: ${{ inputs.prepared_input }}
+        run: python scripts/macos.py plan-prepared
+      - name: Restore the original prepared package
+        id: archive
+        if: inputs.publish
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .macos-downloads
+          key: macos-input-v1-${{ steps.input.outputs.input_revision }}
+      - name: Download and verify the Mac prepared package
+        env:
+          PREPARED_INPUT: ${{ inputs.prepared_input }}
+          INPUT_REVISION: ${{ steps.input.outputs.input_revision }}
+        run: python scripts/macos.py download-prepared
+      - name: Check input cache space
+        id: budget
+        if: inputs.publish && steps.archive.outputs.cache-hit != 'true'
+        run: python scripts/cache_budget.py .macos-downloads macos
+      - name: Cache the completed download before extraction
+        if: inputs.publish && steps.budget.outputs.macos == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .macos-downloads
+          key: ${{ steps.archive.outputs.cache-primary-key }}
+      - name: Resolve the interface generation cache
+        id: interface-key
+        run: python scripts/source/runtime_assets.py macos
+      - name: Restore matching interface resources
+        id: interface
+        if: inputs.publish
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .interface-cache
+          key: ${{ steps.interface-key.outputs.interface_key }}
+      - name: Verify prepared files and source compatibility
+        run: python scripts/macos.py import
+      - name: Check the Metal inspection tool
+        run: xcrun --sdk macosx metal-objdump --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - name: Compile, sign and package both Mac apps
+        env:
+          TOOLS_COMMIT: ${{ steps.tools.outputs.tools_commit }}
+          MACOS_PREPARED_CACHE_HIT: ${{ steps.archive.outputs.cache-hit }}
+        run: python scripts/macos.py build
+      - name: Check interface cache space
+        id: interface-budget
+        if: inputs.publish && steps.interface.outputs.cache-hit != 'true'
+        run: python scripts/cache_budget.py .interface-cache interface
+      - name: Cache verified interface resources
+        if: steps.interface-budget.outputs.interface == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .interface-cache
+          key: ${{ steps.interface-key.outputs.interface_key }}
+      - name: Upload verified macOS packages
+        if: inputs.publish
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macOS-apps
+          overwrite: true
+          path: |
+            outputs/D2RMobile-*-macos*.zip
+            outputs/Mac-SHA256SUMS.txt
+            outputs/macos-build-report.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - name: Publish to your Releases
+        if: inputs.publish
+        run: python scripts/macos.py publish
+      - name: Upload the build report
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-build-report
+          path: outputs/macos-build-report.json
+          if-no-files-found: error
+          retention-days: 3

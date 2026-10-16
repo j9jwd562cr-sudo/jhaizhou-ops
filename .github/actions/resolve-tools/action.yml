@@ -1,0 +1,37 @@
+name: Resolve build tools
+description: Resolve the reusable workflow commit
+inputs:
+  workflow:
+    description: Reusable workflow filename
+    required: true
+outputs:
+  tools_commit:
+    description: Exact reusable workflow commit
+    value: ${{ steps.resolve.outputs.tools_commit }}
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BUILD_WORKFLOW: ${{ inputs.workflow }}
+      run: |
+        python3 - <<'PY'
+        import json, os, re, subprocess, time
+        def api(path):
+            return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
+        repo = os.environ['GITHUB_REPOSITORY']
+        path = 'jiayx/d2r-mobile-build/.github/workflows/' + os.environ['BUILD_WORKFLOW']
+        for attempt in range(3):
+            run = api('repos/' + repo + '/actions/runs/' + os.environ['GITHUB_RUN_ID'])
+            refs = [item['sha'] for item in run.get('referenced_workflows', [])
+                    if item['path'].split('@')[0] == path]
+            if len(set(refs)) == 1 and re.fullmatch('[a-f0-9]{40}', refs[0]):
+                break
+            time.sleep(2)
+        else:
+            raise SystemExit('Cannot resolve the exact reusable workflow commit.')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+            out.write('tools_commit=' + refs[0] + '\n')
+        PY
